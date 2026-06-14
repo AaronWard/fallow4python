@@ -128,7 +128,7 @@ def _provenance_lines(p: Palette, s: Dict[str, Any]) -> List[str]:
 def render_human(report: Dict[str, Any], palette: Palette,
                  scope_label: str) -> str:
     s = report["summary"]
-    lines = [palette.bold("fallow4python - python codebase intelligence")]
+    lines = []
     if scope_label:
         lines.append(palette.dim(scope_label))
     lines.append("")

@@ -31,6 +31,8 @@ dependencies = [
     "radon>=6.0",
     "deptry>=0.16",
     "xenon>=0.9",
+    "import-linter>=2.0",
+    "coverage>=7.0"
 ]
 
 [project.optional-dependencies]
