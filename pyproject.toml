@@ -8,7 +8,7 @@ description = "Codebase intelligence for Python: orchestrate quality tools, corr
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "Your Name" }]
+authors = [{ name = "AW" }]
 keywords = ["linting", "static-analysis", "code-quality", "ci", "sarif", "dead-code", "complexity"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -21,9 +21,9 @@ classifiers = [
 ]
 dynamic = ["version"]
 
-# The fallow4python module itself is pure standard library. These dependencies
-# are the analyzers it orchestrates, pinned to compatible lower bounds so that
-# `pip install fallow4python` gives you a working report out of the box.
+# The fallow4python package is pure standard library. These dependencies are the
+# analyzers it orchestrates as subprocesses (never imported), pinned to
+# compatible lower bounds so `pip install fallow4python` works out of the box.
 dependencies = [
     "ruff>=0.5",
     "mypy>=1.8",
@@ -34,17 +34,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Extra analyzers that only activate when relevant (an importlinter contract is
-# configured, or a coverage.py report is supplied via --coverage).
-full = [
-    "import-linter>=2.0",
-    "coverage>=7.0",
-]
-# Tooling for running the test suite + measuring coverage.
-dev = [
-    "pytest>=7.0",
-    "coverage>=7.0",
-]
+full = ["import-linter>=2.0", "coverage>=7.0"]
+dev = ["pytest>=7.0", "coverage>=7.0"]
 
 [project.scripts]
 fallow4python = "fallow4python.cli:main"
@@ -62,6 +53,9 @@ where = ["src"]
 [tool.setuptools.dynamic]
 version = { attr = "fallow4python.__version__" }
 
+[tool.setuptools.package-data]
+fallow4python = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
@@ -72,12 +66,19 @@ branch = false
 [tool.coverage.report]
 show_missing = true
 
-[tool.setuptools.package-data]
-fallow4python = ["py.typed"]
+# fallow4python runs these analyzers as subprocesses; they are genuine runtime
+# dependencies but are never imported, so deptry's "unused" check (DEP002) is a
+# false positive for them. fallow4python is the first-party package, so its use
+# inside the test suite is not a transitive dependency (DEP003).
+[tool.deptry]
+known_first_party = ["fallow4python"]
+extend_exclude = ["tests"]
+
+[tool.deptry.per_rule_ignores]
+DEP002 = ["ruff", "mypy", "vulture", "radon", "deptry", "xenon", "import-linter", "coverage", "pytest"]
 
 [tool.mypy]
-# Test dependencies (pytest) ship no stubs mypy can resolve in all setups;
-# don't let that mask real type errors in the library itself.
+
 [[tool.mypy.overrides]]
 module = ["pytest", "_pytest.*"]
 ignore_missing_imports = true

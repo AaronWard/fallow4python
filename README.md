@@ -4,25 +4,10 @@
 
 `fallow4python` is a [Fallow](https://fallow.tools/)-style tool for Python: zero-config and `pip install`-able, with the engine itself written in pure standard library. Point it at a repo and it tells you what's wrong, where the problems concentrate, and what's safe to delete.
 
-```
-$ fallow4python
-fallow4python - python codebase intelligence
+<p align="center">
+  <img src="resources/fallow4python.gif" alt="Demo" />
+</p>
 
-  Health: B  (82.4/100)   31 findings, 4120 LOC
-          coverage 78 | maintainability 85 | complexity 91 | cleanliness 74
-
-  ! Complexity       4
-  - Dead code        9
-  x Architecture     1
-
-  Insights
-  x Circular import (app/services.py)
-      circular import among 2 modules: app.services -> app.models -> app.services
-  ! Risk hotspot (app/billing.py)
-      high complexity (rank D) and only 34% covered — likely to break silently
-  - Likely safe to delete (app/legacy.py:88)
-      unused symbol `old_handler`, 0% covered at runtime
-```
 
 ---
 
