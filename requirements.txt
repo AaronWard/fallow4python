@@ -1,0 +1,21 @@
+# Analyzers orchestrated by fallow4python.
+# fallow4python itself is pure standard library; these are the external tools it
+# runs. Install with:  pip install -r requirements.txt
+#
+# (Equivalent to `pip install fallow4python` for the core set, plus the optional
+# analyzers below. Lower bounds reflect tested-compatible versions.)
+
+# --- core analyzers (always run when present) ---
+ruff>=0.5
+mypy>=1.8
+vulture>=2.10
+radon>=6.0
+deptry>=0.16
+xenon>=0.9
+
+# --- optional analyzers ---
+# import-linter: only runs when an importlinter contract is configured.
+import-linter>=2.0
+# coverage: only needed if you pass --coverage <report.json> to score test
+# coverage and gain runtime evidence for dead-code deletion candidates.
+coverage>=7.0
