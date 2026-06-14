@@ -47,7 +47,6 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
-import itertools
 import json
 import os
 import re
@@ -64,7 +63,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 SCHEMA_VERSION = "1.0"
-TOOL_VERSION = "1.1.2"
+TOOL_VERSION = "1.3.0"
 
 # --------------------------------------------------------------------------- #
 # Ordering / constants
@@ -95,6 +94,27 @@ IGNORE_DIRS = {
     ".pytest_cache", ".tox", ".nox", ".venv", "venv", "env", "node_modules",
     "build", "dist", ".eggs", "site-packages", ".quality", ".idea", ".vscode",
 }
+
+
+def exclude_dir_names() -> str:
+    """Comma-separated directory names (for tools that match on name, e.g. radon -i)."""
+    return ",".join(sorted(IGNORE_DIRS))
+
+
+def exclude_globs() -> str:
+    """Comma-separated path globs covering both rooted and nested matches
+    (for tools that fnmatch the path, e.g. ruff/vulture --exclude)."""
+    pats: List[str] = []
+    for d in sorted(IGNORE_DIRS):
+        pats.append(f"{d}/*")
+        pats.append(f"*/{d}/*")
+    return ",".join(pats)
+
+
+def exclude_regex() -> str:
+    """A regex matching any ignored directory (for tools that take a regex, e.g. mypy)."""
+    names = "|".join(re.escape(d) for d in sorted(IGNORE_DIRS))
+    return rf"(^|/)({names})(/|$)"
 
 
 # --------------------------------------------------------------------------- #
@@ -397,12 +417,21 @@ def severity_for_deptry(code: str) -> str:
 
 
 def _deptry_finding(obj: Dict[str, Any], root: Path) -> Optional[Finding]:
-    error = obj.get("error") if isinstance(obj.get("error"), dict) else {}
-    loc = obj.get("location") if isinstance(obj.get("location"), dict) else {}
-    code = str(error.get("code") or obj.get("code") or obj.get("error_code") or "")
+    error = obj.get("error") if isinstance(obj.get("error"), dict) else None
+    code = str((error or {}).get("code") or obj.get("code")
+               or obj.get("error_code") or "")
     if not code.startswith("DEP"):
         return None
-    msg = str(error.get("message") or obj.get("message") or obj.get("description") or "")
+    # Guard against the recursive JSON walk also matching a finding's *nested*
+    # ``error`` sub-dict (which carries the code but no module/location), which
+    # would double-count every dependency finding. A genuine top-level finding
+    # either wraps its code in an ``error`` dict or carries a module/location.
+    if error is None and not (obj.get("module") or obj.get("location")
+                              or obj.get("file")):
+        return None
+    loc = obj.get("location") if isinstance(obj.get("location"), dict) else {}
+    msg = str((error or {}).get("message") or obj.get("message")
+              or obj.get("description") or "")
     file_v = loc.get("file") or obj.get("file") or obj.get("module") or ""
     return Finding(
         tool="deptry", category="dependencies",
@@ -1588,11 +1617,6 @@ class ToolSpec:
     ingest_only: bool = False         # e.g. coverage
 
 
-def _run_subprocess(argv: List[str], root: Path, timeout: int) -> Tuple[int, str, str]:
-    proc = subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=timeout)
-    return proc.returncode, proc.stdout, proc.returncode and proc.stderr or proc.stderr
-
-
 # --------------------------------------------------------------------------- #
 # Live animated progress (stdlib-only, rendered to stderr, TTY-aware)
 # --------------------------------------------------------------------------- #
@@ -1794,19 +1818,22 @@ def orchestrate(root: Path, target: Path, opts: "Options"
 
     specs: List[ToolSpec] = [
         ToolSpec("ruff", "ruff",
-                 lambda t: ["ruff", "check", "--output-format=json", str(t)],
+                 lambda t: ["ruff", "check", "--output-format=json",
+                            "--exclude", exclude_globs(), str(t)],
                  parse_ruff),
         ToolSpec("mypy", "mypy",
                  lambda t: ["mypy", "--no-error-summary", "--show-column-numbers",
-                            "--no-color-output", "--hide-error-context", str(t)],
+                            "--no-color-output", "--hide-error-context",
+                            "--exclude", exclude_regex(), str(t)],
                  parse_mypy),
         ToolSpec("vulture", "vulture",
-                 lambda t: ["vulture", str(t)], parse_vulture),
+                 lambda t: ["vulture", "--exclude", exclude_globs(), str(t)],
+                 parse_vulture),
         ToolSpec("radon-cc", "radon",
-                 lambda t: ["radon", "cc", "-j", str(t)],
+                 lambda t: ["radon", "cc", "-i", exclude_dir_names(), "-j", str(t)],
                  lambda text, r: parse_radon_cc(text, r, min_rank)),
         ToolSpec("radon-mi", "radon",
-                 lambda t: ["radon", "mi", "-j", str(t)],
+                 lambda t: ["radon", "mi", "-i", exclude_dir_names(), "-j", str(t)],
                  lambda text, r: parse_radon_mi(text, r, min_rank)),
         ToolSpec("deptry", "deptry",
                  lambda t: ["deptry", str(t), "--json-output", "{OUTFILE}"],
@@ -2033,8 +2060,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("command", nargs="?", default="scan",
-                        choices=list(COMMAND_TOOLS),
-                        help="scan (default), audit, health, dead-code, summary")
+                        help="scan (default), audit, health, dead-code, summary; "
+                             "or a path to analyze")
     parser.add_argument("target", nargs="?", default=".",
                         help="path to analyze (default: current directory)")
 
@@ -2043,10 +2070,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tools", help="comma-separated subset of tools/analyzers to run")
 
     parser.add_argument("--from-dir", help="ingest pre-saved tool outputs from this directory")
-    parser.add_argument("--ruff"); parser.add_argument("--mypy")
-    parser.add_argument("--vulture"); parser.add_argument("--radon-cc")
-    parser.add_argument("--radon-mi"); parser.add_argument("--deptry")
-    parser.add_argument("--xenon"); parser.add_argument("--import-linter")
+    parser.add_argument("--ruff")
+    parser.add_argument("--mypy")
+    parser.add_argument("--vulture")
+    parser.add_argument("--radon-cc")
+    parser.add_argument("--radon-mi")
+    parser.add_argument("--deptry")
+    parser.add_argument("--xenon")
+    parser.add_argument("--import-linter")
     parser.add_argument("--coverage", help="path to coverage.py JSON report")
 
     parser.add_argument("--coverage-min", type=float, default=80.0)
@@ -2062,7 +2093,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--format", dest="fmt", default="human",
                         choices=["human", "markdown", "json", "sarif"],
                         help="format written to stdout (default: human)")
-    parser.add_argument("--json-out"); parser.add_argument("--markdown-out")
+    parser.add_argument("--json-out")
+    parser.add_argument("--markdown-out")
     parser.add_argument("--sarif-out")
     parser.add_argument("--max-per-section", type=int, default=100)
     parser.add_argument("--no-run", action="store_true",
@@ -2120,6 +2152,19 @@ def resolve_base(opts: Options, root: Path) -> Optional[str]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
+
+    # The first positional may be a command OR a path. If it isn't a known
+    # command, treat it as the target (so `fallow4python path/to/proj` works).
+    if args.command not in COMMAND_TOOLS:
+        if args.target in (".", None):
+            args.target = args.command
+            args.command = "scan"
+        else:
+            print(f"fallow4python: unknown command '{args.command}' "
+                  f"(choose from {', '.join(COMMAND_TOOLS)}), "
+                  f"or pass a single path", file=sys.stderr)
+            return 2
+
     opts = args_to_options(args)
 
     target = Path(opts.target).resolve()

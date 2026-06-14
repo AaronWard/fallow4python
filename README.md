@@ -230,11 +230,3 @@ fallow4python --from-dir .quality --no-run --markdown-out report.md
 - **Circular imports** builds a module dependency graph from the AST (resolving relative imports) and reports every strongly-connected component with more than one node.
 
 The correlation engine then joins findings across tools by file and symbol to produce Insights, and the health scorer reduces everything to the four-component score above.
-
-## License
-
-MIT (or your choice). See `LICENSE`.
-
-## Contributing
-
-Issues and PRs welcome. `fallow4python`'s own code is intentionally pure standard library — please keep new analyzers in-process and stdlib-only (the declared dependencies are the external tools it runs), and make sure `fallow4python audit --base origin/main` passes on your branch.

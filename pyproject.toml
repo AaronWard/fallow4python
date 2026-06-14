@@ -40,6 +40,11 @@ full = [
     "import-linter>=2.0",
     "coverage>=7.0",
 ]
+# Tooling for running the test suite + measuring coverage.
+dev = [
+    "pytest>=7.0",
+    "coverage>=7.0",
+]
 
 [project.scripts]
 fallow4python = "fallow4python.cli:main"
@@ -56,3 +61,13 @@ where = ["src"]
 
 [tool.setuptools.dynamic]
 version = { attr = "fallow4python.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["fallow4python"]
+branch = false
+
+[tool.coverage.report]
+show_missing = true
