@@ -5,6 +5,7 @@ needed — only the built-in duplication + circular-import analyzers run — whi
 keeps the tests hermetic while still covering main(), orchestrate()'s skip
 paths, summarize(), the correlation engine, and all four output renderers.
 """
+import importlib.util
 import json
 from pathlib import Path
 
@@ -109,6 +110,27 @@ def test_main_writes_output_files(project, tmp_path, capsys):
 def test_main_nonexistent_target():
     rc = main(["--no-run", "/no/such/path/here"])
     assert rc != 0
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("coverage") is None
+    or importlib.util.find_spec("pytest") is None,
+    reason="needs coverage + pytest installed")
+def test_run_tests_populates_coverage(tmp_path, capsys):
+    """--run-tests should execute the suite under coverage and fold the result
+    into the report without any --coverage flag."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "mod.py").write_text("def add(a, b):\n    return a + b\n")
+    (proj / "test_mod.py").write_text(
+        "from mod import add\n\ndef test_add():\n    assert add(1, 2) == 3\n")
+    rc = main(["--run-tests", "--no-run", "--format", "json", str(proj)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    data = json.loads(out)
+    cov = [m for m in data["metrics"] if m["name"] == "total-line-coverage"]
+    assert cov, "coverage metric should be present after --run-tests"
+    assert cov[0]["value"] > 0
 
 
 # --- renderers exercised directly with a rich report (insights + verdict) --- #

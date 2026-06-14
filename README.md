@@ -230,3 +230,50 @@ fallow4python --from-dir .quality --no-run --markdown-out report.md
 - **Circular imports** builds a module dependency graph from the AST (resolving relative imports) and reports every strongly-connected component with more than one node.
 
 The correlation engine then joins findings across tools by file and symbol to produce Insights, and the health scorer reduces everything to the four-component score above.
+
+## Testing
+
+The suite is plain `pytest`; coverage is measured with `coverage.py`:
+
+```bash
+pip install -e ".[dev]"
+coverage run -m pytest          # run the tests under coverage
+coverage report                 # see line coverage
+```
+
+### Coverage runs by default
+
+A scan runs your test suite under `coverage.py` automatically and folds the
+result into the health score — no flag needed:
+
+```bash
+fallow4python                 # runs `pytest` under coverage, scores it
+```
+
+To skip the test run (faster, or in environments without a runner), pass
+`--ignore-tests`; the `coverage` component then becomes `n/a` and the score
+renormalizes over the remaining three components:
+
+```bash
+fallow4python --ignore-tests
+```
+
+Override the runner with `--test-command` (anything runnable via
+`coverage run -m`):
+
+```bash
+fallow4python --test-command "pytest -q tests"
+fallow4python --test-command "unittest discover"
+```
+
+This requires `coverage` (and your test runner) installed in the same
+environment as fallow4python — `pip install coverage pytest`, or
+`pip install "fallow4python[dev]"`. It uses a private coverage data file (never
+clobbering your `.coverage`), respects your `[tool.coverage.run]` config when
+present, ignores files outside the scanned tree, and skips gracefully if
+coverage isn't available. You can also supply a pre-made report instead:
+
+```bash
+coverage run -m pytest && coverage json -o coverage.json
+fallow4python --coverage coverage.json
+```

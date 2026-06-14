@@ -47,9 +47,11 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -63,7 +65,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 SCHEMA_VERSION = "1.0"
-TOOL_VERSION = "1.3.0"
+TOOL_VERSION = "1.5.0"
 
 # --------------------------------------------------------------------------- #
 # Ordering / constants
@@ -651,11 +653,16 @@ def parse_coverage(text: str, root: Path, min_percent: float
     for filename, info in files.items():
         if not isinstance(info, dict):
             continue
+        f = rel(normalize_path(filename), root)
+        # Skip files outside the scanned tree (e.g. an installed copy of the
+        # package in site-packages when tests import it instead of the source).
+        # Reporting their paths as project hotspots is noise.
+        if f.startswith(".."):
+            continue
         summary = info.get("summary") if isinstance(info.get("summary"), dict) else {}
         pct = to_float(summary.get("percent_covered"))
         if pct is None:
             continue
-        f = rel(normalize_path(filename), root)
         metrics.append(Metric(tool="coverage", name="file-line-coverage",
                               value=pct, unit="%", file=f))
         if pct < min_percent:
@@ -1807,6 +1814,76 @@ class LiveProgress:
         self._lines = len(rows)
 
 
+def _has_coverage_config(root: Path) -> bool:
+    """True if the project already configures coverage's measured source."""
+    if (root / ".coveragerc").is_file():
+        return True
+    for name, marker in (("pyproject.toml", "[tool.coverage"),
+                         ("setup.cfg", "[coverage:")):
+        p = root / name
+        if p.is_file():
+            try:
+                if marker in read_text(p):
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def _coverage_via_tests(root: Path, target: Path, opts: "Options"
+                        ) -> Tuple[Optional[str], str]:
+    """Run the project's test suite under coverage.py and return its JSON report.
+
+    Returns (json_text, detail) on success, or (None, reason) if coverage isn't
+    installed, the run produced no data, or it timed out. Uses a private data
+    file via COVERAGE_FILE so it never clobbers the user's own .coverage. The
+    measured source follows the project's coverage config when present, else
+    falls back to the scan target.
+    """
+    if importlib.util.find_spec("coverage") is None:
+        return None, "coverage not installed (pip install coverage, or fallow4python[full])"
+    try:
+        parts = shlex.split(opts.test_command) or ["pytest"]
+    except ValueError:
+        parts = ["pytest"]
+    py = sys.executable
+    fd_data, data_path = tempfile.mkstemp(prefix="fallow4python-", suffix=".coverage")
+    os.close(fd_data)
+    fd_json, json_path = tempfile.mkstemp(prefix="fallow4python-", suffix=".json")
+    os.close(fd_json)
+    env = dict(os.environ, COVERAGE_FILE=data_path)
+    run_cmd = [py, "-m", "coverage", "run"]
+    if not _has_coverage_config(root):
+        run_cmd += ["--source", str(target)]
+    run_cmd += ["-m", *parts]
+    try:
+        proc = subprocess.run(run_cmd, cwd=root, capture_output=True, text=True,
+                              timeout=opts.timeout, env=env)
+        subprocess.run(
+            [py, "-m", "coverage", "json", "-o", json_path],
+            cwd=root, capture_output=True, text=True, timeout=opts.timeout, env=env)
+        jp = Path(json_path)
+        if not jp.exists() or not jp.stat().st_size:
+            # Surface the most useful line of stderr so failures are debuggable
+            # (e.g. "No module named pytest").
+            tail = ""
+            err_lines = [ln for ln in (proc.stderr or "").splitlines() if ln.strip()]
+            if err_lines:
+                tail = f": {err_lines[-1][:80]}"
+            return None, f"test run produced no coverage data{tail}"
+        return read_text(jp), f"ran `{opts.test_command}` under coverage"
+    except subprocess.TimeoutExpired:
+        return None, f"test run timed out after {opts.timeout}s"
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
+    finally:
+        for p in (data_path, json_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
 def orchestrate(root: Path, target: Path, opts: "Options"
                 ) -> Tuple[List[Finding], List[Metric], List[ToolRun]]:
     findings: List[Finding] = []
@@ -1879,27 +1956,36 @@ def orchestrate(root: Path, target: Path, opts: "Options"
             runs.append(run)
             prog.finish(spec.name, run.status, run.findings, note=run.detail)
 
-        # Coverage is ingest-only (it needs a test run to produce data).
-        if (not selected or "coverage" in selected) and opts.coverage_path:
+        # Coverage needs a test run to produce data: either ingest a supplied
+        # report (--coverage) or run the suite ourselves (--run-tests).
+        if not selected or "coverage" in selected:
             prog.start("coverage")
-            cov_path = Path(opts.coverage_path)
-            if cov_path.is_file():
+            cov_text: Optional[str] = None
+            detail = ""
+            run = None
+            if opts.coverage_path:
+                cov_path = Path(opts.coverage_path)
+                if cov_path.is_file():
+                    cov_text, detail = read_text(cov_path), str(cov_path)
+                else:
+                    run = ToolRun("coverage", "skipped", f"file not found: {cov_path}")
+            elif opts.run_tests:
+                cov_text, detail = _coverage_via_tests(root, target, opts)
+                if cov_text is None:
+                    run = ToolRun("coverage", "skipped", detail)
+            else:
+                run = ToolRun("coverage", "skipped",
+                              "tests skipped (--ignore-tests); coverage is n/a")
+            if cov_text is not None and run is None:
                 try:
-                    fs, ms = parse_coverage(read_text(cov_path), root, cov_min)
+                    fs, ms = parse_coverage(cov_text, root, cov_min)
                     findings += fs
                     metrics += ms
-                    run = ToolRun("coverage", "ingested", str(cov_path), len(fs))
+                    run = ToolRun("coverage", "ingested", detail, len(fs))
                 except Exception as exc:  # noqa: BLE001
                     run = ToolRun("coverage", "error", str(exc))
-            else:
-                run = ToolRun("coverage", "skipped", f"file not found: {cov_path}")
             runs.append(run)
             prog.finish("coverage", run.status, run.findings, note=run.detail)
-        elif not opts.coverage_path and (not selected or "coverage" in selected):
-            prog.start("coverage")
-            run = ToolRun("coverage", "skipped", "no --coverage json provided")
-            runs.append(run)
-            prog.finish("coverage", run.status, note=run.detail)
 
         # Built-in analyzers (no external dependency).
         if not selected or "duplication" in selected:
@@ -2029,6 +2115,8 @@ class Options:
     explicit_inputs: Dict[str, str]
     coverage_path: Optional[str]
     coverage_min: float
+    run_tests: bool
+    test_command: str
     radon_min_rank: str
     fail_on: str
     gate: str
@@ -2079,6 +2167,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--xenon")
     parser.add_argument("--import-linter")
     parser.add_argument("--coverage", help="path to coverage.py JSON report")
+    parser.add_argument("--ignore-tests", action="store_true",
+                        help="do NOT run the test suite for coverage; the "
+                             "coverage component becomes n/a and the score "
+                             "renormalizes over the remaining components")
+    parser.add_argument("--test-command", default="pytest",
+                        help="module + args run under `coverage run -m` to "
+                             "measure coverage (default: pytest)")
 
     parser.add_argument("--coverage-min", type=float, default=80.0)
     parser.add_argument("--radon-min-rank", default="C",
@@ -2125,6 +2220,7 @@ def args_to_options(args: argparse.Namespace) -> Options:
         command=args.command, target=args.target, base=base, tools=tools,
         from_dir=args.from_dir, explicit_inputs=explicit,
         coverage_path=args.coverage, coverage_min=args.coverage_min,
+        run_tests=not args.ignore_tests, test_command=args.test_command,
         radon_min_rank=args.radon_min_rank, fail_on=args.fail_on, gate=args.gate,
         fmt=args.fmt, json_out=args.json_out, markdown_out=args.markdown_out,
         sarif_out=args.sarif_out, max_per_section=args.max_per_section,
