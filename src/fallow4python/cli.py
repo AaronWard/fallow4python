@@ -65,7 +65,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 SCHEMA_VERSION = "1.0"
-TOOL_VERSION = "1.5.0"
+TOOL_VERSION = "1.5.1"
 
 # --------------------------------------------------------------------------- #
 # Ordering / constants
@@ -214,6 +214,11 @@ def to_float(value: Any) -> Optional[float]:
         return None
 
 
+def _as_dict(value: Any) -> Dict[str, Any]:
+    """Return value if it's a dict, else an empty dict (narrows JSON results)."""
+    return value if isinstance(value, dict) else {}
+
+
 def safe_json_loads(text: str) -> Optional[Any]:
     stripped = text.strip()
     if not stripped:
@@ -310,7 +315,7 @@ def parse_ruff(text: str, root: Path) -> Tuple[List[Finding], List[Metric]]:
         for item in data:
             if not isinstance(item, dict):
                 continue
-            loc = item.get("location") if isinstance(item.get("location"), dict) else {}
+            loc = _as_dict(item.get("location"))
             code = str(item.get("code") or "")
             msg = str(item.get("message") or "")
             out.append(Finding(
@@ -431,7 +436,7 @@ def _deptry_finding(obj: Dict[str, Any], root: Path) -> Optional[Finding]:
     if error is None and not (obj.get("module") or obj.get("location")
                               or obj.get("file")):
         return None
-    loc = obj.get("location") if isinstance(obj.get("location"), dict) else {}
+    loc = _as_dict(obj.get("location"))
     msg = str((error or {}).get("message") or obj.get("message")
               or obj.get("description") or "")
     file_v = loc.get("file") or obj.get("file") or obj.get("module") or ""
@@ -637,7 +642,7 @@ def parse_coverage(text: str, root: Path, min_percent: float
     if not isinstance(data, dict):
         return [Finding(tool="coverage", category="reporting", severity="error",
                         rule="parse-error", message="coverage input was not valid JSON")], []
-    totals = data.get("totals") if isinstance(data.get("totals"), dict) else {}
+    totals = _as_dict(data.get("totals"))
     total_pct = to_float(totals.get("percent_covered"))
     if total_pct is not None:
         metrics.append(Metric(tool="coverage", name="total-line-coverage",
@@ -649,7 +654,7 @@ def parse_coverage(text: str, root: Path, min_percent: float
                 rule="coverage-total", value=total_pct,
                 message=f"total coverage {total_pct:.2f}% below threshold {min_percent:.0f}%",
             ))
-    files = data.get("files") if isinstance(data.get("files"), dict) else {}
+    files = _as_dict(data.get("files"))
     for filename, info in files.items():
         if not isinstance(info, dict):
             continue
@@ -659,7 +664,7 @@ def parse_coverage(text: str, root: Path, min_percent: float
         # Reporting their paths as project hotspots is noise.
         if f.startswith(".."):
             continue
-        summary = info.get("summary") if isinstance(info.get("summary"), dict) else {}
+        summary = _as_dict(info.get("summary"))
         pct = to_float(summary.get("percent_covered"))
         if pct is None:
             continue
@@ -1675,7 +1680,7 @@ class LiveProgress:
     # the active spinner and (a stronger gold) for errors so they stand out.
     _STATE_ICON = {
         "pending": ("◌", _DIM),
-        "running": (None, None),       # animated gold spinner
+        "running": (None, _GOLD),       # animated gold spinner (color unused here)
         "done":    ("●", 44),
         "ingested":("●", 44),
         "ran":     ("●", 44),
@@ -1962,30 +1967,32 @@ def orchestrate(root: Path, target: Path, opts: "Options"
             prog.start("coverage")
             cov_text: Optional[str] = None
             detail = ""
-            run = None
+            cov_run: Optional[ToolRun] = None
             if opts.coverage_path:
                 cov_path = Path(opts.coverage_path)
                 if cov_path.is_file():
                     cov_text, detail = read_text(cov_path), str(cov_path)
                 else:
-                    run = ToolRun("coverage", "skipped", f"file not found: {cov_path}")
+                    cov_run = ToolRun("coverage", "skipped", f"file not found: {cov_path}")
             elif opts.run_tests:
                 cov_text, detail = _coverage_via_tests(root, target, opts)
                 if cov_text is None:
-                    run = ToolRun("coverage", "skipped", detail)
+                    cov_run = ToolRun("coverage", "skipped", detail)
             else:
-                run = ToolRun("coverage", "skipped",
+                cov_run = ToolRun("coverage", "skipped",
                               "tests skipped (--ignore-tests); coverage is n/a")
-            if cov_text is not None and run is None:
+            if cov_text is not None and cov_run is None:
                 try:
                     fs, ms = parse_coverage(cov_text, root, cov_min)
                     findings += fs
                     metrics += ms
-                    run = ToolRun("coverage", "ingested", detail, len(fs))
+                    cov_run = ToolRun("coverage", "ingested", detail, len(fs))
                 except Exception as exc:  # noqa: BLE001
-                    run = ToolRun("coverage", "error", str(exc))
-            runs.append(run)
-            prog.finish("coverage", run.status, run.findings, note=run.detail)
+                    cov_run = ToolRun("coverage", "error", str(exc))
+            if cov_run is None:  # defensive: every branch above should set it
+                cov_run = ToolRun("coverage", "skipped", "coverage not evaluated")
+            runs.append(cov_run)
+            prog.finish("coverage", cov_run.status, cov_run.findings, note=cov_run.detail)
 
         # Built-in analyzers (no external dependency).
         if not selected or "duplication" in selected:

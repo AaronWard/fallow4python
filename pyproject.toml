@@ -71,3 +71,13 @@ branch = false
 
 [tool.coverage.report]
 show_missing = true
+
+[tool.setuptools.package-data]
+fallow4python = ["py.typed"]
+
+[tool.mypy]
+# Test dependencies (pytest) ship no stubs mypy can resolve in all setups;
+# don't let that mask real type errors in the library itself.
+[[tool.mypy.overrides]]
+module = ["pytest", "_pytest.*"]
+ignore_missing_imports = true
