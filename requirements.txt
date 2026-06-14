@@ -15,7 +15,8 @@ xenon>=0.9
 
 # --- optional analyzers ---
 # import-linter: only runs when an importlinter contract is configured.
-import-linter>=2.0
+# import-linter>=2.0
+import-linter
 # coverage: only needed if you pass --coverage <report.json> to score test
 # coverage and gain runtime evidence for dead-code deletion candidates.
 coverage>=7.0

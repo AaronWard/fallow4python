@@ -64,7 +64,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 SCHEMA_VERSION = "1.0"
-TOOL_VERSION = "1.1.0"
+TOOL_VERSION = "1.1.2"
 
 # --------------------------------------------------------------------------- #
 # Ordering / constants
@@ -1597,32 +1597,38 @@ def _run_subprocess(argv: List[str], root: Path, timeout: int) -> Tuple[int, str
 # Live animated progress (stdlib-only, rendered to stderr, TTY-aware)
 # --------------------------------------------------------------------------- #
 
-# Coral -> pink -> violet sweep, echoing the terminal-stats aesthetic.
-_GRADIENT = [
-    (255, 138, 101), (255, 112, 86), (255, 94, 98),
-    (240, 98, 146), (186, 104, 200), (149, 117, 205),
-]
-_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-_BAR_FULL = "█"
-_BAR_EMPTY = "░"
+# 256-color (8-bit) palette. We deliberately avoid 24-bit truecolor because
+# common terminals (e.g. macOS Terminal.app) don't support it and mangle the
+# escapes into the wrong hue. 256-color is supported essentially everywhere.
+#
+# Scheme: a turquoise ramp (light -> deep) as the primary color, with gold as
+# the single accent (the active spinner and the highlight sweeping the bar).
+_TURQ = [159, 122, 80, 44, 37, 30]   # pale aqua -> deep teal
+_GOLD = 220                          # accent: active / sweep
+_GOLD_HI = 214                       # accent, stronger (errors)
+_DIM = 66                            # muted teal-grey for idle / skipped
+_SPINNER = "⣾⣽⣻⢿⡿⣟⣯⣷"
+_BAR_FULL = "▰"
+_BAR_EMPTY = "▱"
 
 
-def _truecolor(rgb: Tuple[int, int, int], text: str) -> str:
-    r, g, b = rgb
-    return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
+def _c(code: int, text: str) -> str:
+    return f"\033[38;5;{code}m{text}\033[0m"
 
 
-def _gradient_text(text: str, phase: float = 0.0) -> str:
-    """Color each character along the gradient, offset by an animation phase."""
-    n = len(_GRADIENT)
+def _wordmark(text: str, phase: float, final: bool) -> str:
+    """Turquoise wordmark with a single gold cell shimmering across it."""
+    n = len(_TURQ)
+    hi = -1 if final else int(phase * len(text)) % max(len(text), 1)
     out = []
     for i, ch in enumerate(text):
         if ch == " ":
             out.append(ch)
             continue
-        pos = (i / max(len(text) - 1, 1) + phase) % 1.0
-        idx = int(pos * n) % n
-        out.append(_truecolor(_GRADIENT[idx], ch))
+        if i == hi:
+            out.append(_c(_GOLD, ch))
+        else:
+            out.append(_c(_TURQ[int(i / max(len(text) - 1, 1) * (n - 1))], ch))
     return "".join(out)
 
 
@@ -1634,14 +1640,16 @@ class LiveProgress:
     while the main thread blocks on each analyzer subprocess.
     """
 
+    # Glyph + 256-color code per state. Turquoise for resolved/idle, gold for
+    # the active spinner and (a stronger gold) for errors so they stand out.
     _STATE_ICON = {
-        "pending": ("·", (110, 110, 120)),
-        "running": (None, None),                 # animated spinner
-        "done":    ("✓", (102, 187, 106)),
-        "ingested":("✓", (102, 187, 106)),
-        "ran":     ("✓", (102, 187, 106)),
-        "skipped": ("∅", (140, 130, 90)),
-        "error":   ("✗", (239, 83, 80)),
+        "pending": ("◌", _DIM),
+        "running": (None, None),       # animated gold spinner
+        "done":    ("●", 44),
+        "ingested":("●", 44),
+        "ran":     ("●", 44),
+        "skipped": ("○", _DIM),
+        "error":   ("▲", _GOLD_HI),
     }
 
     def __init__(self, steps: Sequence[str], enabled: bool):
@@ -1712,43 +1720,57 @@ class LiveProgress:
 
     def _render(self, final: bool = False) -> None:
         frame = _SPINNER[self._tick % len(_SPINNER)]
-        phase = (self._tick % 40) / 40.0
-        done = sum(1 for s in self.order if self.state[s] != "pending"
-                   and self.state[s] != "running")
+        phase = (self._tick % 48) / 48.0
+        done = sum(1 for s in self.order
+                   if self.state[s] not in ("pending", "running"))
         total = len(self.order)
         elapsed = time.monotonic() - self._start_ts
 
         rows: List[str] = []
-        # Header: gradient wordmark + sweeping progress bar + clock.
-        width = 14
+
+        # Header: a leading pip, a shimmering wordmark, a status verb + clock.
+        pip = _c(44, "●") if final else _c(_GOLD, frame)
+        title = _wordmark("fallow4python", phase, final)
+        verb = "complete" if final else "scanning"
+        rows.append(f"  {pip}  {title}   \033[2m{verb}\033[0m"
+                    f"   \033[2m{elapsed:5.1f}s\033[0m")
+
+        # Progress bar on its own line: turquoise fill (light->deep), a gold
+        # highlight sweeping the filled segment, muted empties.
+        width = 18
         filled = int(round(width * done / max(total, 1)))
-        bar = "".join(
-            _truecolor(_GRADIENT[(i + self._tick) % len(_GRADIENT)], _BAR_FULL)
-            if i < filled else _truecolor((70, 70, 80), _BAR_EMPTY)
-            for i in range(width)
-        )
-        title = _gradient_text("fallow4python", 0.0 if final else phase)
-        verb = "done" if final else "analyzing"
-        rows.append(f"  {title}  {bar}  "
-                    f"\033[2m{verb} · {done}/{total} · {elapsed:4.1f}s\033[0m")
+        comet = self._tick % width
+        cells = []
+        for i in range(width):
+            if i < filled:
+                tone = _TURQ[min(int(i / max(filled, 1) * len(_TURQ)),
+                                 len(_TURQ) - 1)]
+                if i == comet and not final:
+                    cells.append(_c(_GOLD, _BAR_FULL))
+                else:
+                    cells.append(_c(tone, _BAR_FULL))
+            else:
+                cells.append(_c(_DIM, _BAR_EMPTY))
+        rows.append(f"     {''.join(cells)}  \033[2m{done} / {total}\033[0m")
         rows.append("")
 
+        # Per-step checklist.
         for step in self.order:
             st = self.state[step]
             if st == "running":
-                icon = _truecolor((255, 138, 101), frame)
-                name = _truecolor((255, 171, 145), f"{step:<16}")
-                tail = "\033[2mrunning…\033[0m"
+                icon = _c(_GOLD, frame)
+                name = _c(_TURQ[2], f"{step:<15}")
+                tail = "\033[2m…\033[0m"
             else:
-                glyph, rgb = self._STATE_ICON.get(st, ("·", (120, 120, 120)))
-                icon = _truecolor(rgb, glyph or "·")
+                glyph, code = self._STATE_ICON.get(st, ("◌", _DIM))
+                icon = _c(code, glyph or "◌")
                 if st == "pending":
-                    name = f"\033[2m{step:<16}\033[0m"
+                    name = _c(_DIM, f"{step:<15}")
                     tail = ""
                 else:
-                    name = f"{step:<16}"
+                    name = _c(code, f"{step:<15}")
                     tail = f"\033[2m{self.detail.get(step) or st}\033[0m"
-            rows.append(f"   {icon} {name} {tail}")
+            rows.append(f"     {icon} {name} {tail}")
 
         # Move cursor to the top of the previously-drawn block, clear, redraw.
         buf: List[str] = []
